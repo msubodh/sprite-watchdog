@@ -2,6 +2,8 @@
 
 An outside-in watchdog agent that lives on a [Fly.io Sprite](https://sprites.dev). Built for Fly.io Hacksgiving (23-29 Nov 2026).
 
+**Demo video (75 s):** https://github.com/msubodh/sprite-watchdog/releases/download/hacksgiving-2026/demo.mp4
+
 It watches a Linux server (my dev box) and a handful of public web apps from somewhere that is neither of them. When something breaks, it emails the owner through a Sprites connector, so the Sprite never holds the email API key. When a job scheduler on the home server looks stuck, it can ask the server to restart it. The server only does that after checking the request against its own short allowlist.
 
 ## How it works
