@@ -1,0 +1,13 @@
+{
+  "_doc": "Server side. Real file: ~/.config/fly-watchdog/link.json (600). allow_units can only narrow the hard-coded allowlist in watchdog_link.py.",
+  "sprite_url": "https://<sprite>.sprites.app",
+  "key_file": "~/.config/fly-watchdog/hmac.key",
+  "host_label": "server",
+  "allow_units": ["job-supervisor.service", "job-supervisor.timer", "jobs-sync.service"],
+  "dry_run": false,
+  "jobs_json": "/var/lib/myjobs/jobs.json",
+  "local_checks": [
+    {"name": "local-api", "type": "http", "url": "http://127.0.0.1:8000/"},
+    {"name": "web-server", "type": "unit", "unit": "nginx.service", "user": false}
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "_doc": "Shape of the production config. The real file lives only on the Sprite and the devbox (never in git): it names real hosts.",
+  "mode": "prod",
+  "public_status": false,
+  "interval_s": 180,
+  "fail_threshold": 2,
+  "heartbeat_stale_s": 900,
+  "keepalive": false,
+  "cycle_on_heartbeat": true,
+  "min_cycle_gap_s": 60,
+  "job_stalled_after_s": 5400,
+  "supervisor_stale_s": 1800,
+  "jobs_index_stale_s": 900,
+  "kick_units": ["job-supervisor.service", "job-supervisor.timer", "jobs-sync.service"],
+  "kick_cooldown_s": 1800,
+  "startup_email": true,
+  "targets": [
+    {"name": "app-prod", "url": "https://app.example.com/healthz", "json_field": {"path": "ok", "equals": true}},
+    {"name": "cloudflare-status", "url": "https://www.cloudflarestatus.com/api/v2/status.json", "json_field": {"path": "status.indicator", "not_in": ["major", "critical"]}}
+  ],
+  "alerts": {
+    "max_per_hour": 6,
+    "from": "Fly Watchdog <onboarding@resend.dev>",
+    "to": "you@example.com",
+    "resend_gateway_url": "https://api.sprites.dev/v1/gateway/resend/<connection_id>"
+  },
+  "llm": {}
+}

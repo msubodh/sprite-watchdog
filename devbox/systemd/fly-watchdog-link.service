@@ -1,0 +1,8 @@
+[Unit]
+Description=fly-watchdog: push signed heartbeat to the Fly Sprite and run vetted kick requests (see ~/src/fly-watchdog/README.md)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/src/fly-watchdog/devbox/watchdog_link.py
+TimeoutStartSec=60
+NoNewPrivileges=yes

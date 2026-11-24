@@ -1,0 +1,10 @@
+[Unit]
+Description=fly-watchdog heartbeat every 5 minutes (each push wakes the Sprite)
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target

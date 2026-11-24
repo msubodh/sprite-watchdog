@@ -1,0 +1,19 @@
+{
+  "_doc": "Public demo config. Fake targets only (served by demo/fake_fleet.py on 127.0.0.1). Safe to show on screen.",
+  "mode": "demo",
+  "public_status": true,
+  "interval_s": 15,
+  "fail_threshold": 2,
+  "heartbeat_stale_s": 90,
+  "job_stalled_after_s": 5400,
+  "supervisor_stale_s": 1800,
+  "kick_units": ["job-supervisor.service", "job-supervisor.timer"],
+  "kick_cooldown_s": 60,
+  "targets": [
+    {"name": "shop", "url": "http://127.0.0.1:9000/svc/shop", "json_field": {"path": "ok", "equals": true}},
+    {"name": "blog", "url": "http://127.0.0.1:9000/svc/blog", "json_field": {"path": "ok", "equals": true}},
+    {"name": "api", "url": "http://127.0.0.1:9000/svc/api", "json_field": {"path": "ok", "equals": true}}
+  ],
+  "alerts": {"max_per_hour": 30},
+  "llm": {"model": "@cf/meta/llama-3.1-8b-instruct"}
+}
