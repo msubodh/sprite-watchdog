@@ -174,6 +174,28 @@ class WakeMode(unittest.TestCase):
 class EndToEnd(unittest.TestCase):
     """Real HTTP: devbox link -> Sprite handler -> signed orders -> vetted execution."""
 
+    def test_receipts_survive_rejected_reply_and_drain_in_batches(self):
+        receipts = [{"id": f"{i:032x}", "result": "dry-run"} for i in range(21)]
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "key").write_bytes(KEY)
+            (d / "config").write_text(json.dumps({"sprite_url": "http://example.invalid", "key_file": str(d / "key")}))
+            with mock.patch.object(watchdog_link, "CFG_PATH", d / "config"), \
+                    mock.patch.object(watchdog_link, "STATE_DIR", d), \
+                    mock.patch.object(watchdog_link, "collect", return_value={}), \
+                    mock.patch.object(watchdog_link.urllib.request, "urlopen") as send:
+                state = watchdog_link.load_state()
+                state["acks"] = receipts
+                watchdog_link.save_state(state)
+                response = send.return_value.__enter__.return_value
+                for body, valid, expected in [(b'{}', False, 2), (b'{"orders":{}}', True, 2), (b'{}', True, 0)]:
+                    with mock.patch.object(wdproto, "new_nonce", return_value="1" * 32):
+                        response.headers = {"X-WD-Sig": wdproto.sign_orders(KEY, "1" * 32, body) if valid else ""}
+                        response.read.return_value = body
+                        self.assertEqual(watchdog_link.main(), expected)
+                    self.assertEqual(watchdog_link.load_state()["acks"], receipts if expected else receipts[20:])
+                    self.assertEqual(json.loads(send.call_args.args[0].data)["acks"], receipts[:20])
+
     def test_full_loop(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
