@@ -107,6 +107,22 @@ class Vet(unittest.TestCase):
 
 
 class Rules(unittest.TestCase):
+    def test_lost_receipt_does_not_block_future_orders(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = watchdog.State(Path(d))
+            hb = {"supervisor": {"timer_active": False}, "jobs": [{"state": "running"}]}
+            with mock.patch.object(watchdog, "now", return_value=10000):
+                first, live = watchdog.plan_kicks(self.cfg(), st, hb, 10000)
+            first["state"] = live["state"] = "delivered"
+            live["issued_at"], live["expires_at"] = 11900, 12500
+            st.save()
+            st = watchdog.State(Path(d))
+            with mock.patch.object(watchdog, "now", return_value=12000):
+                new = watchdog.plan_kicks(self.cfg(), st, hb, 12000)
+            self.assertEqual([o["unit"] for o in new], [first["unit"]])
+            self.assertNotEqual(new[0]["id"], first["id"])
+            self.assertEqual([o["state"] for o in st.data["orders"]], ["expired", "delivered", "queued"])
+
     def cfg(self):
         return {"kick_units": ["job-supervisor.service", "job-supervisor.timer", "jobs-sync.service"],
                 "heartbeat_stale_s": 480, "job_stalled_after_s": 5400}
