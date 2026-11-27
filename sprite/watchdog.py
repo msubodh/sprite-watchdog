@@ -261,7 +261,13 @@ def plan_kicks(cfg: dict, st: State, hb: dict | None, hb_at: float | None) -> li
     orders = []
     t = now()
     with st.lock:
-        pending_units = {o["unit"] for o in st.data["orders"] if o["state"] in ("queued", "delivered")}
+        pending_units = set()
+        for o in st.data["orders"]:
+            if o["state"] in ("queued", "delivered"):
+                if o["expires_at"] < t:
+                    o["state"] = "expired"
+                else:
+                    pending_units.add(o["unit"])
         for unit, why in want:
             if unit not in allowed or not wdproto.UNIT_RE.match(unit) or unit in pending_units:
                 continue

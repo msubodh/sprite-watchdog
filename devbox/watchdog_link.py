@@ -210,7 +210,7 @@ def main() -> int:
     key = Path(os.path.expanduser(cfg["key_file"])).read_bytes().strip()
     state = load_state()
     hb = collect(cfg)
-    hb["acks"] = state["acks"][-20:]
+    hb["acks"] = state["acks"][:20]
     hb["sent_at"] = int(time.time())
     body = json.dumps(hb, sort_keys=True).encode()
     ts, nonce = int(time.time()), wdproto.new_nonce()
@@ -225,18 +225,19 @@ def main() -> int:
         log("push-failed", error=type(e).__name__)
         save_state(state)
         return 1
-    state["acks"] = []  # delivered
     if not wdproto.verify_orders(key, nonce, sig, raw):
         log("reply-rejected", reason="bad-sig")
         save_state(state)
         return 2
     try:
         orders = json.loads(raw).get("orders", [])
-        assert isinstance(orders, list)
+        if not isinstance(orders, list):
+            raise ValueError("invalid orders")
     except Exception:
         log("reply-rejected", reason="bad-json")
         save_state(state)
         return 2
+    del state["acks"][:len(hb["acks"])]  # delivered
     if orders:
         handle_orders(orders, cfg, state)
     save_state(state)
