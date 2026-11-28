@@ -48,3 +48,18 @@ Clone to the path the systemd unit expects: `git clone https://github.com/msubod
 `python3 -m unittest discover -s tests -v` covers the protocol, signatures, replay protection, the allowlist and rate limits, the rules, and a real HTTP round trip.
 
 See `SECURITY.md` for the threat model.
+## Registered notifications
+
+Add these top-level settings to select external deliveries. Omit `alert_channels` for legacy delivery; `[]` disables registered and legacy external notifications. Demo mode does not send. For email only, remove the webhook entry; for both, subscribe both entries to the same events.
+
+```json
+{
+  "webhook_hosts": ["hooks.example.com"],
+  "alert_channels": [
+    {"id":"ops","kind":"webhook","events":["DOWN","RECOVERED","STALL","KICK"],"url":"https://hooks.example.com/events","secret":"HOOK_KEY"},
+    {"id":"mail","kind":"email","events":["DOWN","RECOVERED"],"to":"you@example.com","sender":"alerts@example.com","secret":"MAIL_KEY"}
+  ]
+}
+```
+
+Provide each named secret in the service environment: an independent random signing key for each webhook, and a Resend API key with a verified sender for email. Deliveries share a 256-item persistent queue. Each channel has six attempts per rolling hour including retries; over-budget items wait. After three failed attempts or 24 hours, inspect `delivery_dead` in the local state file (latest 256 records). KICK is informational; responses cannot request restarts.

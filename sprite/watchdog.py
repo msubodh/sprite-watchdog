@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wdproto  # noqa: E402
+from channels import Registry
 
 MAX_BODY = 64 * 1024
 MAX_NONCES = 10_000
@@ -81,6 +82,8 @@ class State:
     def save(self) -> None:
         with self.lock:
             tmp = self.path.with_suffix(".tmp")
+            tmp.touch(mode=0o600, exist_ok=True)
+            tmp.chmod(0o600)
             tmp.write_text(json.dumps(self.data, indent=1, sort_keys=True))
             os.replace(tmp, self.path)
 
@@ -289,6 +292,7 @@ class Agent:
     def __init__(self, cfg: dict, key: bytes, st: State):
         self.cfg, self.key, self.st = cfg, key, st
         self.alerter = Alerter(cfg, st)
+        self.channels = Registry(cfg, st) if 'alert_channels' in cfg else None
         self.need_fails = cfg.get("fail_threshold", 2)
         self.last_cycle = time.monotonic()
         self.cycle_lock = threading.Lock()
@@ -312,6 +316,8 @@ class Agent:
                 if ok:
                     if c["status"] == "down":
                         up.append(f"RECOVERED {name}: {detail} (was down since {c['since']})")
+                        if self.channels:
+                            self.channels.enqueue('RECOVERED', now(), name)
                         c["status"], c["since"] = "up", iso()
                     c["fails"] = 0
                 else:
@@ -319,9 +325,16 @@ class Agent:
                     if c["status"] != "down" and c["fails"] >= self.need_fails:
                         c["status"], c["since"] = "down", iso()
                         down.append(f"DOWN {name}: {detail}")
+                        if self.channels:
+                            self.channels.enqueue('STALL' if name.startswith('job:') else 'DOWN', now(), name)
             # checks that disappeared (e.g. a job finished) are dropped quietly
             for gone in [n for n in checks if n not in results]:
+                if self.channels and checks[gone]['status'] == 'down':
+                    self.channels.enqueue('RECOVERED', now(), gone)
                 del checks[gone]
+            if self.channels:
+                for order in kicks:
+                    self.channels.enqueue('KICK', now(), order['unit'])
             self.st.save()
         for k in kicks:
             self.st.event("kick-queued", unit=k["unit"], why=k["why"], order=k["id"][:8])
@@ -329,8 +342,9 @@ class Agent:
         if down or up:
             subject = f"{len(down)} down, {len(up)} recovered" if down else f"{len(up)} recovered"
             self.st.event("transition", down=down, up=up)
-            self.alerter.send(f"Watchdog: {subject}", lines)
-        elif kicks:
+            if not self.channels:
+                self.alerter.send(f"Watchdog: {subject}", lines)
+        elif kicks and not self.channels:
             self.alerter.send("Watchdog: requested a restart kick", lines)
 
     def maybe_cycle(self) -> bool:
@@ -349,7 +363,7 @@ class Agent:
     def run_forever(self) -> None:
         interval = self.cfg.get("interval_s", 180)
         self.st.event("agent-start", mode=self.cfg.get("mode", "prod"), interval_s=interval)
-        if self.cfg.get("startup_email"):
+        if self.cfg.get("startup_email") and not self.channels:
             self.alerter.send("Watchdog online", [f"Started on a Fly.io Sprite; checking {len(self.cfg.get('targets', []))} endpoints every {interval} s plus the devbox heartbeat."])
         while True:
             t0 = now()
@@ -512,6 +526,8 @@ def main() -> None:
         sys.exit("hmac key too short")
     st = State(Path(os.environ.get("WD_STATE_DIR", "/home/sprite/fly-watchdog/state")))
     agent = Agent(cfg, key, st)
+    if agent.channels and cfg.get('mode') != 'demo':
+        threading.Thread(target=agent.channels.run, daemon=True).start()
     threading.Thread(target=agent.run_forever, daemon=True).start()
     if cfg.get("keepalive", True):
         threading.Thread(target=keepalive_forever, args=(st, agent), daemon=True).start()
