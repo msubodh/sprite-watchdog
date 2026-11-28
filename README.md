@@ -62,4 +62,4 @@ Add these top-level settings to select external deliveries. Omit `alert_channels
 }
 ```
 
-Provide each named secret in the service environment: an independent random signing key for each webhook, and a Resend API key with a verified sender for email. Deliveries share a 256-item persistent queue. Each channel has six attempts per rolling hour including retries; over-budget items wait. After three failed attempts or 24 hours, inspect `delivery_dead` in the local state file (latest 256 records). KICK is informational; responses cannot request restarts.
+Provide each named secret in the service environment: an independent random signing key for each webhook, and a Resend API key with a verified sender for email. Deliveries share a 256-item persistent queue. Each channel has six attempts per rolling hour including retries; over-budget items wait. After three transient failures or 24 hours, inspect `delivery_dead` in the local state file (latest 256 records retained up to seven days). Terminal failures dead-letter immediately. KICK is informational; responses cannot request restarts.
