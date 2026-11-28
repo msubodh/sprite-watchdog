@@ -20,6 +20,101 @@ def config():
 
 
 class ChannelTests(unittest.TestCase):
+    def test_job_incident_survives_restart_and_closes_once(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sprite'))
+        import watchdog
+        cfg = config() | dict(fail_threshold=1)
+        cfg['alert_channels'][0]['events'].append('RECOVERED')
+        for recovery_jobs in ([dict(name='sample', state='done')], []):
+            with self.subTest(recovery_jobs=recovery_jobs), tempfile.TemporaryDirectory() as d:
+                st = watchdog.State(Path(d))
+                st.data.update(heartbeat_at=watchdog.now(), heartbeat={'jobs': [
+                    dict(name='sample', state='running', progress_age_s=6000)]})
+                a = watchdog.Agent(cfg, bytes(32), st)
+                a.alerter = Mock()
+                a.cycle()
+                a.cycle()
+                self.assertEqual(a.alerter.method_calls, [])
+                st = watchdog.State(Path(d))
+                a = watchdog.Agent(cfg, bytes(32), st)
+                a.alerter = Mock()
+                st.data['heartbeat']['jobs'] = recovery_jobs
+                a.cycle()
+                a.cycle()
+                events = [json.loads(x['body']) for x in st.data['delivery_queue']]
+                self.assertEqual([x['event'] for x in events], ['STALL', 'RECOVERED'])
+                self.assertTrue(events[0]['incident'])
+                self.assertEqual(events[0]['incident'], events[1]['incident'])
+                self.assertEqual(a.alerter.method_calls, [])
+
+    def test_restart_after_reservation(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sprite'))
+        import watchdog
+        with tempfile.TemporaryDirectory() as d:
+            st = watchdog.State(Path(d))
+            r = channels.Registry(config(), st)
+            r.enqueue('STALL', 100)
+            with self.assertRaises(InterruptedError):
+                r.drain(100, Mock(side_effect=InterruptedError))
+            loaded = watchdog.State(Path(d))
+            item, = loaded.data['delivery_queue']
+            self.assertEqual(item['attempts'], 1)
+            self.assertEqual(loaded.data['delivery_budget']['hook'], [100])
+            r = channels.Registry(config(), loaded)
+            send = Mock(return_value=204)
+            r.drain(item['due'] - .01, send)
+            send.assert_not_called()
+            r.drain(item['due'], send)
+            r.drain(200, send)
+            send.assert_called_once()
+            self.assertEqual(loaded.data['delivery_queue'], [])
+
+    def test_expiry_at_24_hours(self):
+        self.r.enqueue('STALL', 0)
+        self.r.enqueue('STALL', 1)
+        send = Mock(return_value=200)
+        self.r.drain(86400, send)
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[1]['created'], 1)
+        self.assertEqual([x['reason'] for x in self.state.data['delivery_dead']], ['expired'])
+
+    def test_overflow_isolation_and_dead_letter_retention(self):
+        for t in range(128+257):
+            self.r.enqueue('STALL', t)
+        self.r.enqueue('DOWN', 385)
+        queue = self.state.data['delivery_queue']
+        self.assertEqual([x['channel'] for x in queue], ['hook'] * 128 + ['mail'])
+        dead = self.state.data['delivery_dead']
+        self.assertEqual([x['time'] for x in dead], list(range(129, 385)))
+        for x in dead:
+            self.assertEqual(set(x), {'id', 'channel', 'attempts', 'time', 'reason'})
+            self.assertEqual((x['channel'], x['attempts'], x['reason']), ('hook', 0, 'overflow'))
+        # Drain all live items before advancing the clock to isolate retention.
+        for t in range(385, 385 + 22*3600, 3600):
+            for _ in range(6):
+                self.r.drain(t, lambda *_: 204)
+        self.assertFalse(queue)
+        self.r.drain(129+7*86400, Mock())
+        self.assertEqual([x['time'] for x in dead], list(range(130, 385)))
+
+    def test_config_change_or_removal_never_delivers_old_items(self):
+        for mode in ('changed', 'removed', 'empty'):
+            with self.subTest(mode=mode):
+                cfg = config()
+                self.state.data = {}
+                channels.Registry(cfg, self.state).enqueue('STALL', 100)
+                if mode == 'empty':
+                    cfg['alert_channels'].clear()
+                elif mode == 'removed':
+                    cfg['alert_channels'].pop(0)
+                else:
+                    cfg['alert_channels'][0]['url'] += '/changed'
+                send = Mock()
+                channels.Registry(cfg, self.state).drain(101, send)
+                send.assert_not_called()
+                self.assertEqual([x['reason'] for x in self.state.data['delivery_dead']], ['configuration'])
+                self.assertFalse(self.state.data['delivery_queue'])
+
     def setUp(self):
         env = patch.dict(channels.os.environ, {'HOOK_KEY':'example', 'MAIL_KEY':'example'})
         env.start()

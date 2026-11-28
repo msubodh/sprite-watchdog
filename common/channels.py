@@ -158,7 +158,7 @@ class Registry:
                 self.dead(item, t, 'overflow')
 
     def run(self):
-        for channel in self.channels:
+        for channel in self.channels or [None]:
             threading.Thread(target=self.worker, args=(channel,), daemon=True).start()
 
     def worker(self, channel):
@@ -170,11 +170,12 @@ class Registry:
             time.sleep(5)
 
     def drain(self, t=None, send=deliver, channel=None):
-        if channel is None:
+        if channel is None and self.channels:
             for cid in self.channels:
                 self.drain(t, send, cid)
             return
-        guard = self.guards[channel]
+        # An empty registry still has to retire orphaned work and age its log.
+        guard = self.guards[channel] if channel is not None else self.state.lock
         if not guard.acquire(blocking=False):
             return
         try:
@@ -199,7 +200,7 @@ class Registry:
                         dirty = True
                 if dirty:
                     self.state.save()
-                if not queue:
+                if not queue or channel is None:
                     return
             # One due item per channel per pass; reserve durably before I/O.
             for c in [self.channels[channel]]:
