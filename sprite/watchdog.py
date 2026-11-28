@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import wdproto  # noqa: E402
+import uuid
 from channels import Registry
 
 MAX_BODY = 64 * 1024
@@ -85,7 +86,14 @@ class State:
             tmp.touch(mode=0o600, exist_ok=True)
             tmp.chmod(0o600)
             tmp.write_text(json.dumps(self.data, indent=1, sort_keys=True))
+            with tmp.open('rb') as handle:
+                os.fsync(handle.fileno())
             os.replace(tmp, self.path)
+            fd = os.open(self.dir, os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def event(self, kind: str, **kw) -> None:
         rec = {"at": iso(), "kind": kind, **kw}
@@ -304,8 +312,11 @@ class Agent:
             results[t["name"]] = http_probe(t)
         with self.st.lock:
             hb, hb_at = self.st.data["heartbeat"], self.st.data["heartbeat_at"]
+        stalls = set()
         if self.cfg.get("expect_heartbeat", True):
-            results.update(heartbeat_checks(self.cfg, hb, hb_at))
+            heartbeat = heartbeat_checks(self.cfg, hb, hb_at)
+            stalls = {k for k, (ok, _) in heartbeat.items() if k.startswith('job:') and not ok}
+            results.update(heartbeat)
         kicks = plan_kicks(self.cfg, self.st, hb, hb_at)
         down, up = [], []
         with self.st.lock:
@@ -317,7 +328,7 @@ class Agent:
                     if c["status"] == "down":
                         up.append(f"RECOVERED {name}: {detail} (was down since {c['since']})")
                         if self.channels:
-                            self.channels.enqueue('RECOVERED', now(), name)
+                            self.channels.enqueue('RECOVERED', now(), name, c.pop('notification_incident', None))
                         c["status"], c["since"] = "up", iso()
                     c["fails"] = 0
                 else:
@@ -326,11 +337,12 @@ class Agent:
                         c["status"], c["since"] = "down", iso()
                         down.append(f"DOWN {name}: {detail}")
                         if self.channels:
-                            self.channels.enqueue('STALL' if name.startswith('job:') else 'DOWN', now(), name)
+                            c['notification_incident'] = str(uuid.uuid4())
+                            self.channels.enqueue('STALL' if name in stalls else 'DOWN', now(), name, c['notification_incident'])
             # checks that disappeared (e.g. a job finished) are dropped quietly
             for gone in [n for n in checks if n not in results]:
                 if self.channels and checks[gone]['status'] == 'down':
-                    self.channels.enqueue('RECOVERED', now(), gone)
+                    self.channels.enqueue('RECOVERED', now(), gone, checks[gone].get('notification_incident'))
                 del checks[gone]
             if self.channels:
                 for order in kicks:

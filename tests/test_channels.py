@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'common'))
 import channels
@@ -20,6 +21,9 @@ def config():
 
 class ChannelTests(unittest.TestCase):
     def setUp(self):
+        env = patch.dict(channels.os.environ, {'HOOK_KEY':'example', 'MAIL_KEY':'example'})
+        env.start()
+        self.addCleanup(env.stop)
         self.state = Mock(data={})
         import threading
         self.state.lock = threading.RLock()
@@ -91,6 +95,12 @@ class ChannelTests(unittest.TestCase):
             saved = watchdog.State(Path(d))
             self.assertEqual([item['channel'] for item in saved.data['delivery_queue']], ['mail'])
             self.assertEqual(saved.data['orders'], [])
+            incident = json.loads(saved.data['delivery_queue'][0]['body'])['incident']
+            agent.channels.channels['mail']['events'].append('RECOVERED')
+            st.data.update(heartbeat={}, heartbeat_at=watchdog.now())
+            agent.cycle()
+            recovery = json.loads(st.data['delivery_queue'][-1]['body'])
+            self.assertEqual((recovery['event'], recovery['incident']), ('RECOVERED',incident))
 
     def test_policy(self):
         for url in ['http://hooks.example.com/', 'https://hooks.example.com:444/', 'https://bad.example.com/', 'https://user@hooks.example.com/', 'https://127.0.0.1/']:
@@ -98,3 +108,64 @@ class ChannelTests(unittest.TestCase):
                 channels.destination(url, ['hooks.example.com'])
         answers = [(socket.AF_INET, 1, 6, '', (str(ip), 443)) for ip in ('93.184.216.34', '127.0.0.1')]
         with self.assertRaises(ValueError): channels.checked(answers)
+
+    def test_vector_and_tampering(self):
+        uid = '00000000-0000-4000-8000-000000000001'
+        expected = 'v1=54d37dee61e75f48609e4d7416a4e96cb4938da3750dd2e5aa10e1fcd93042ac'
+        for body, valid in [(b'{}', True), (b'{ }', False)]:
+            sig = channels.headers(bytes(range(32)), uid, 100, body)['X-Watchdog-Signature']
+            self.assertEqual(hmac.compare_digest(expected, sig), valid)
+
+    def test_invalid_registration(self):
+        for change in [dict(kind='unknown'), dict(id='hook'), dict(secret='HOOK_KEY'), dict(secret='BAD'), dict(secret='MAIL_MISSING'), dict(events=['UNKNOWN'])]:
+            cfg = config()
+            cfg['alert_channels'][1].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError): channels.Registry(cfg, self.state)
+        cfg = config()
+        cfg['alert_channels'].append(cfg['alert_channels'][0] | dict(id='other',secret='HOOK_OTHER'))
+        with patch.dict(channels.os.environ, {'HOOK_OTHER':'example'}), self.assertRaises(ValueError): channels.Registry(cfg, self.state)
+
+    def test_fanout_and_mail_transport(self):
+        cfg = config()
+        cfg['alert_channels'][0]['events'] = ['DOWN']
+        r = channels.Registry(cfg, self.state)
+        r.enqueue('DOWN', 10)
+        items = self.state.data['delivery_queue']
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]['body'], items[1]['body'])
+        self.assertNotEqual(items[0]['id'], items[1]['id'])
+        with patch.object(channels, 'post', return_value=202) as post:
+            self.assertEqual(channels.send_one(r.channels['mail'], items[1], 10), 202)
+            self.assertEqual(post.call_args.args[:2], ('api.resend.com', '/emails'))
+        with patch.object(channels.subprocess,'run',side_effect=channels.subprocess.TimeoutExpired('child',5)) as child:
+            self.assertEqual(channels.deliver(r.channels['mail'], items[1],10), 0)
+            self.assertEqual(child.call_args.kwargs['timeout'], 5)
+
+    def test_real_restart_concurrent_reservations(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sprite'))
+        import watchdog
+        with tempfile.TemporaryDirectory() as d:
+            st = watchdog.State(Path(d))
+            cfg = config() | dict(fail_threshold=1)
+            a = watchdog.Agent(cfg, bytes(32), st)
+            a.cycle()
+            for _ in range(7): a.channels.enqueue('DOWN', watchdog.now())
+            send = Mock(return_value=200)
+            def drain(_): a.channels.drain(send=send)
+            with ThreadPoolExecutor(4) as pool: list(pool.map(drain, range(40)))
+            for _ in range(8): drain(None)
+            self.assertEqual(send.call_count, 6)
+            loaded = watchdog.State(Path(d))
+            channels.Registry(cfg, loaded).drain(send=send)
+            self.assertEqual(send.call_count, 6)
+
+    def test_empty_vs_absent(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sprite'))
+        import watchdog
+        for cfg, enabled in [({}, False), ({'alert_channels': []}, True)]:
+            with tempfile.TemporaryDirectory() as d:
+                a = watchdog.Agent(cfg | dict(fail_threshold=1), bytes(32), watchdog.State(Path(d)))
+                a.alerter = Mock()
+                a.cycle()
+                self.assertEqual(a.channels is not None, enabled)
+                self.assertEqual(bool(a.alerter.method_calls), not enabled)

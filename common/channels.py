@@ -108,7 +108,8 @@ class Registry:
             email = c.get('kind') == 'email'
             fields = {'id', 'events', 'kind', 'secret'} | ({'sender', 'to'} if email else {'url'})
             if (set(c) != fields or not re.fullmatch(r'[a-z][a-z0-9_-]{0,31}', c['id']) or
-                    c['id'] in self.channels or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', c['secret']) or
+                    c['id'] in self.channels or not re.fullmatch(('MAIL_' if email else 'HOOK_') + r'[A-Z][A-Z0-9_]{0,58}', c['secret']) or
+                    not os.environ.get(c['secret']) or c['secret'] in keys or
                     not isinstance(c['events'], list) or not c['events'] or
                     set(c['events']) - {'DOWN', 'RECOVERED', 'STALL', 'KICK'} or
                     len(set(c['events'])) != len(c['events'])):
@@ -125,10 +126,11 @@ class Registry:
             if dest in seen:
                 raise ValueError('duplicate destination')
             seen.add(dest)
+            keys.add(c['secret'])
             self.channels[c['id']] = c
             self.bindings[c['id']] = hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
         self.state = state
-        self.guard = threading.Lock()
+        self.guards = {k: threading.Lock() for k in self.channels}
         for key, default in [('delivery_queue', []), ('delivery_dead', []), ('delivery_budget', {})]:
             state.data.setdefault(key, default)
 
@@ -137,35 +139,57 @@ class Registry:
         log.append({k: item[k] for k in ('id', 'channel', 'attempts')} | {'time': t, 'reason': reason})
         del log[:-256]
 
-    def enqueue(self, event, t, check='watchdog'):
+    def enqueue(self, event, t, check='watchdog', incident=None):
         # Caller saves this together with the transition under the state lock.
-        incident = str(uuid.uuid4())
+        incident = incident or str(uuid.uuid4())
         for channel, c in self.channels.items():
             if event not in c['events']:
                 continue
-            item = dict(id=str(uuid.uuid4()), channel=channel, attempts=0, due=t, created=t,
+            uid = str(uuid.uuid5(uuid.UUID(incident), channel + ':' + event))
+            item = dict(id=uid, channel=channel, attempts=0, due=t, created=t,
                         binding=self.bindings[channel], body=json.dumps(dict(version=1, event=event,
                         incident=incident, time=int(t), summary=f'{event}: {check[:64]}')))
             queue = self.state.data['delivery_queue']
-            if len(queue) < 256:
+            if any(x['id'] == uid for x in queue):
+                continue
+            if sum(x['channel'] == channel for x in queue) < 256 // len(self.channels):
                 queue.append(item)
             else:
                 self.dead(item, t, 'overflow')
 
     def run(self):
+        for channel in self.channels:
+            threading.Thread(target=self.worker, args=(channel,), daemon=True).start()
+
+    def worker(self, channel):
         while True:
-            self.drain()
+            try:
+                self.drain(channel=channel)
+            except Exception:
+                print('notification drain failed', file=sys.stderr, flush=True)
             time.sleep(5)
 
-    def drain(self, t=None, send=deliver):
-        if not self.guard.acquire(blocking=False):
+    def drain(self, t=None, send=deliver, channel=None):
+        if channel is None:
+            for cid in self.channels:
+                self.drain(t, send, cid)
+            return
+        guard = self.guards[channel]
+        if not guard.acquire(blocking=False):
             return
         try:
             timestamp = time.time() if t is None else t
             with self.state.lock:
                 queue = self.state.data['delivery_queue']
                 dirty = False
+                log = self.state.data['delivery_dead']
+                retained = [x for x in log if timestamp-x['time'] < 7*86400]
+                if len(retained) != len(log):
+                    log[:] = retained
+                    dirty = True
                 for item in queue[:]:
+                    if item['channel'] != channel and item['channel'] in self.channels:
+                        continue
                     reason = ('configuration' if self.bindings.get(item['channel']) != item['binding'] else
                               'expired' if timestamp-item['created'] >= 86400 else
                               'exhausted' if item['attempts'] >= 3 else None)
@@ -178,11 +202,12 @@ class Registry:
                 if not queue:
                     return
             # One due item per channel per pass; reserve durably before I/O.
-            for channel, c in self.channels.items():
+            for c in [self.channels[channel]]:
                 with self.state.lock:
                     now = time.time() if t is None else t
                     item = next((x for x in queue if x['channel'] == channel and x['due'] <= now), None)
                     slots = self.state.data['delivery_budget'].setdefault(channel, [])
+                    # Rolling half-open interval (now - 3600, now].
                     slots[:] = [s for s in slots if s > now-3600]
                     if item is None or len(slots) >= 6:
                         continue
@@ -199,7 +224,7 @@ class Registry:
                             self.dead(item, now, 'exhausted' if transient else 'rejected')
                     self.state.save()
         finally:
-            self.guard.release()
+            guard.release()
 
 
 if __name__ == '__main__':

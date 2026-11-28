@@ -14,7 +14,7 @@
 | Orders: 10-minute expiry, single-use ids, at most 4 per reply, at most 1 per unit per 30 min, at most 6 per 24 h. | `vet()` |
 | Append-only audit logs on both sides (`events.jsonl`, `link-events.jsonl`). | both |
 | The heartbeat carries no secrets, hostnames or IPs. Paths in status lines are replaced with `<path>`. | `collect()` |
-| Third-party keys (Resend, Workers AI) live in Sprites connectors with deny-by-default policies limited to this Sprite's name and to the one API path it needs. | connector policy |
+| Legacy delivery uses scoped Sprites connectors. Registered email instead uses a dedicated `MAIL_` environment credential sent only to Resend; webhook keys use the separate `HOOK_` namespace and never leave the process. All registered references must resolve at startup. | connector policy / registered channel transport |
 
 **Residual risk**: anyone holding the HMAC key (the Sprite and the home server) can request up to 6 scheduler starts a day. Each one is harmless by construction. Rotating the key means writing a new key to both sides.
 ## Registered webhook receivers
