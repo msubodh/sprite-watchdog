@@ -1,6 +1,9 @@
 import hashlib
 import hmac
 import json
+import io
+import contextlib
+import runpy
 import socket
 import tempfile
 import unittest
@@ -166,7 +169,7 @@ class ChannelTests(unittest.TestCase):
         addr = ('93.184.216.34', 443)
         answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', addr)]
         with patch.object(socket, 'getaddrinfo', return_value=answer) as dns, patch.object(socket, 'socket') as sock, patch.object(channels.ssl, 'create_default_context') as context, patch.object(channels.http.client, 'HTTPSConnection') as connection:
-            response = connection.return_value.__enter__.return_value.getresponse.return_value.__enter__.return_value
+            response = connection.return_value.getresponse.return_value.__enter__.return_value
             response.status = 200
             response.read.return_value = b'{"action":"start_unit"}'
             self.assertEqual(channels.post('hooks.example.com', '/event', b'{}', {}), 200)
@@ -175,6 +178,42 @@ class ChannelTests(unittest.TestCase):
             raw.connect.assert_called_once_with(addr)
             context.return_value.wrap_socket.assert_called_once_with(raw, server_hostname='hooks.example.com')
             response.read.assert_not_called()
+
+    def test_real_http_connection_uses_checked_peer(self):
+        addr = ('93.184.216.34', 443)
+        answer = [(socket.AF_INET, socket.SOCK_STREAM, 6, '', addr)]
+        with patch.object(socket, 'getaddrinfo', return_value=answer), patch.object(socket, 'socket') as sock, patch.object(channels.ssl, 'create_default_context') as context:
+            tls = context.return_value.wrap_socket.return_value.__enter__.return_value
+            tls.makefile.return_value = io.BytesIO(b'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n')
+            self.assertEqual(channels.post('hooks.example.com', '/event', b'{}', {}), 204)
+            sock.return_value.__enter__.return_value.connect.assert_called_once_with(addr)
+            context.return_value.wrap_socket.assert_called_once_with(sock.return_value.__enter__.return_value, server_hostname='hooks.example.com')
+            self.assertTrue(any(b'POST /event HTTP/1.1' in call.args[0] for call in tls.sendall.call_args_list))
+
+    def test_child_entry_and_delivery_failure_classification(self):
+        self.r.enqueue('STALL', 100)
+        item = self.state.data['delivery_queue'][0]
+        c = self.r.channels['hook']
+
+        def child(args, **kw):
+            self.assertEqual(args[1], '-I')
+            self.assertEqual(kw['timeout'], 5)
+            output = io.StringIO()
+            with patch.object(sys, 'stdin', io.StringIO(kw['input'])), contextlib.redirect_stdout(output), patch.object(socket, 'getaddrinfo', return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('93.184.216.34', 443))]), patch.object(socket, 'socket'), patch.object(channels.ssl, 'create_default_context') as context:
+                context.return_value.wrap_socket.return_value.__enter__.return_value.makefile.return_value = io.BytesIO(b'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n')
+                runpy.run_path(str(Path(channels.__file__).resolve()), run_name='__main__')
+            return channels.subprocess.CompletedProcess(args, 0, output.getvalue())
+
+        with patch.object(channels.subprocess, 'run', side_effect=child):
+            self.assertEqual(channels.deliver(c, item, 100), 204)
+        for failure in (channels.subprocess.CalledProcessError(1, ['child']), ValueError('bad output')):
+            with self.subTest(failure=type(failure).__name__), patch.object(channels.subprocess, 'run', side_effect=failure):
+                self.assertEqual(channels.deliver(c, item, 100), -1)
+        with patch.object(channels.subprocess, 'run', side_effect=channels.subprocess.CalledProcessError(1, ['child'])):
+            self.r.drain(100)
+        self.assertEqual(self.state.data['delivery_dead'][-1]['reason'], 'internal')
+        with patch.object(channels.subprocess, 'run', side_effect=channels.subprocess.TimeoutExpired('child', 5)):
+            self.assertEqual(channels.deliver(c, item, 100), 0)
 
     def test_agent_transition_persists_without_legacy_send(self):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sprite'))

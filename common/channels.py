@@ -62,11 +62,14 @@ def post(host, path, body, fields):
         raw.settimeout(4)
         raw.connect(addr)
         with ssl.create_default_context().wrap_socket(raw, server_hostname=host) as tls:
-            with http.client.HTTPSConnection(host) as conn:
+            conn = http.client.HTTPSConnection(host)
+            try:
                 conn.sock = tls
                 conn.request('POST', path, body, {'Content-Type': 'application/json', **fields})
                 with conn.getresponse() as response:
                     return response.status  # Never read the body or follow Location.
+            finally:
+                conn.close()
 
 
 def send_one(c, item, timestamp):
@@ -89,8 +92,10 @@ def deliver(c, item, timestamp):
                            input=json.dumps([c, item, timestamp]), text=True,
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True)
         return int(p.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, subprocess.TimeoutExpired):
         return 0
+    except (ValueError, subprocess.CalledProcessError):
+        return -1  # Internal child failure is terminal; never expose its output.
 
 
 class Registry:
@@ -222,7 +227,7 @@ class Registry:
                     if not transient or item['attempts'] == 3:
                         queue.remove(item)
                         if not 200 <= status < 300:
-                            self.dead(item, now, 'exhausted' if transient else 'rejected')
+                            self.dead(item, now, 'exhausted' if transient else 'internal' if status == -1 else 'rejected')
                     self.state.save()
         finally:
             guard.release()
